@@ -17,6 +17,21 @@ import (
 	"github.com/tidwall/sjson"
 )
 
+// openAIReasoningNode returns the reasoning field from an OpenAI-format message or
+// streaming delta, accepting either spelling.
+//
+// vLLM's OpenAI-compatible server, and gateways built on it, emit "reasoning" —
+// matching the OpenAI Responses API — while DeepSeek-style backends emit
+// "reasoning_content". Reading only the latter silently drops the model's entire
+// chain of thought: no error, no thinking blocks, and for reasoning-first models the
+// visible answer can arrive empty.
+func openAIReasoningNode(container gjson.Result, prefix string) gjson.Result {
+	if node := container.Get(prefix + "reasoning_content"); node.Exists() {
+		return node
+	}
+	return container.Get(prefix + "reasoning")
+}
+
 var (
 	dataTag = []byte("data:")
 )
@@ -166,7 +181,7 @@ func convertOpenAIStreamingChunkToAnthropic(rawJSON []byte, param *ConvertOpenAI
 		}
 
 		// Handle reasoning content delta
-		if reasoning := delta.Get("reasoning_content"); reasoning.Exists() {
+		if reasoning := openAIReasoningNode(delta, ""); reasoning.Exists() {
 			for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 				if reasoningText == "" {
 					continue
@@ -427,7 +442,7 @@ func convertOpenAINonStreamingToAnthropic(rawJSON []byte) [][]byte {
 	if choices := root.Get("choices"); choices.Exists() && choices.IsArray() && len(choices.Array()) > 0 {
 		choice := choices.Array()[0] // Take first choice
 
-		reasoningNode := choice.Get("message.reasoning_content")
+		reasoningNode := openAIReasoningNode(choice, "message.")
 		for _, reasoningText := range collectOpenAIReasoningTexts(reasoningNode) {
 			if reasoningText == "" {
 				continue
@@ -711,7 +726,7 @@ func ConvertOpenAIResponseToClaudeNonStream(_ context.Context, _ string, origina
 				}
 			}
 
-			if reasoning := message.Get("reasoning_content"); reasoning.Exists() {
+			if reasoning := openAIReasoningNode(message, ""); reasoning.Exists() {
 				for _, reasoningText := range collectOpenAIReasoningTexts(reasoning) {
 					if reasoningText == "" {
 						continue
