@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -446,12 +447,61 @@ func claudeErrorDetailFromText(status int, errText string) (string, string) {
 				}
 				if m, ok := payload["message"].(string); ok && strings.TrimSpace(m) != "" {
 					message = strings.TrimSpace(m)
+				} else if d, ok := payload["detail"].(string); ok && strings.TrimSpace(d) != "" {
+					// FastAPI-based upstreams (vLLM and SGLang, and the gateways built on
+					// them) report the error under "detail" rather than "message". Without
+					// this the whole upstream JSON is passed through as the message text.
+					message = strings.TrimSpace(d)
 				}
 			}
 		}
 	}
 
+	message = normalizeContextLimitMessage(status, message)
+
 	return errType, message
+}
+
+// Claude Code decides whether an over-length prompt is recoverable by matching the
+// upstream error text against `prompt is too long[^0-9]*(\d+)\s*tokens?\s*>\s*(\d+)`.
+// On a match it compacts the conversation and retries; otherwise the error reaches the
+// user and the session ends. Upstreams that speak the OpenAI dialect describe the same
+// condition in their own words, so the client never recognises it.
+//
+// These patterns restate such messages in the phrasing the client matches, keeping the
+// original text so no diagnostic detail is lost.
+var (
+	claudeCtxLimitNormalized = regexp.MustCompile(`(?i)prompt is too long`)
+
+	// vLLM, SGLang, and gateways fronting them, e.g.
+	//   "This model's maximum context length is 32768 tokens. However, your request has
+	//    66511 input tokens. Please reduce the length of the input messages."
+	//   "This model's maximum context length is 8192 tokens. However, you requested 9000
+	//    tokens (8000 in the messages, 1000 in the completion)."
+	claudeCtxLimitVLLM = regexp.MustCompile(
+		`(?is)maximum context length is\s+(\d+)\s+tokens?.*?(?:your request has|you requested)\s+(\d+)`)
+)
+
+// normalizeContextLimitMessage rewrites an upstream context-length error into the form
+// Claude Code recognises. Messages that already use that phrasing, and errors that
+// compaction cannot fix, are returned unchanged.
+func normalizeContextLimitMessage(status int, message string) string {
+	if status != http.StatusBadRequest && status != http.StatusRequestEntityTooLarge {
+		return message
+	}
+	if message == "" || claudeCtxLimitNormalized.MatchString(message) {
+		return message
+	}
+	// Deliberately narrow: only the input-too-long condition is rewritten. An upstream
+	// rejecting max_tokens as larger than the context window (for example
+	// "max_tokens=500000 cannot be greater than max_model_len=393216") is not fixed by
+	// compacting, so leaving it alone keeps the client from retrying pointlessly.
+	m := claudeCtxLimitVLLM.FindStringSubmatch(message)
+	if m == nil {
+		return message
+	}
+	limit, used := m[1], m[2]
+	return fmt.Sprintf("prompt is too long: %s tokens > %s maximum (%s)", used, limit, message)
 }
 
 func claudeErrorTypeFromStatus(status int) string {
