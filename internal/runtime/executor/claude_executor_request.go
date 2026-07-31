@@ -366,6 +366,16 @@ func claudeCreds(a *cliproxyauth.Auth) (apiKey, baseURL string) {
 			apiKey = v
 		}
 	}
+	// File-backed credentials land their whole JSON in Metadata, never in
+	// Attributes, so an OAuth token file previously had no way to point at an
+	// alternate endpoint. Accepting base_url from Metadata makes token files
+	// consistent with config entries, and makes the upstream request
+	// observable for debugging.
+	if baseURL == "" && a.Metadata != nil {
+		if v, ok := a.Metadata["base_url"].(string); ok {
+			baseURL = strings.TrimSpace(v)
+		}
+	}
 	return
 }
 
