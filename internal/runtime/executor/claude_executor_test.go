@@ -3122,6 +3122,88 @@ func TestEnsureClaudeThinkingDisplay_SetsSummarizedWhenMissing(t *testing.T) {
 	}
 }
 
+func TestClaudeExecutorOAuthPrefixModePreservesCallerSystemAtTransport(t *testing.T) {
+	const callerSystem = "You are a security monitor for autonomous AI coding agents."
+
+	var upstreamBody []byte
+	ctx := context.WithValue(context.Background(), "cliproxy.roundtripper", claudeOAuthPrefixRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		var errRead error
+		upstreamBody, errRead = io.ReadAll(req.Body)
+		if errRead != nil {
+			return nil, errRead
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body: io.NopCloser(strings.NewReader(
+				`{"id":"msg_test","type":"message","role":"assistant","content":[{"type":"text","text":"ok"}],` +
+					`"model":"claude-opus-5","stop_reason":"end_turn","usage":{"input_tokens":1,"output_tokens":1}}`,
+			)),
+			Request: req,
+		}, nil
+	}))
+
+	executor := NewClaudeExecutor(&config.Config{ClaudeCloakMode: "prefix"})
+	auth := &cliproxyauth.Auth{
+		ID:       "claude-oauth",
+		Provider: "claude",
+		Metadata: map[string]any{"access_token": "sk-ant-oat01-test"},
+	}
+	payload := []byte(`{"model":"claude-opus-5","max_tokens":16,` +
+		`"system":[{"type":"text","text":"` + callerSystem + `"}],` +
+		`"messages":[{"role":"user","content":"hi"}]}`)
+
+	_, err := executor.Execute(ctx, auth, cliproxyexecutor.Request{
+		Model:   "claude-opus-5",
+		Payload: payload,
+	}, cliproxyexecutor.Options{SourceFormat: sdktranslator.FromString("claude")})
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+
+	system := gjson.GetBytes(upstreamBody, "system").Array()
+	if len(system) != 2 {
+		t.Fatalf("outbound system blocks = %d, want 2; body = %s", len(system), upstreamBody)
+	}
+	if got := system[0].Get("text").String(); got != identity {
+		t.Fatalf("outbound first system block = %q, want identity line; body = %s", got, upstreamBody)
+	}
+	if got := system[1].Get("text").String(); got != callerSystem {
+		t.Fatalf("outbound caller system block = %q, want %q; body = %s", got, callerSystem, upstreamBody)
+	}
+}
+
+func TestApplyCloakingReadsOAuthPrefixModeFromTopLevelTokenMetadata(t *testing.T) {
+	const callerSystem = "You are a security monitor for autonomous AI coding agents."
+
+	auth := &cliproxyauth.Auth{Metadata: map[string]any{
+		"access_token": "sk-ant-oat01-test",
+		"cloak_mode":   "prefix",
+	}}
+	payload := []byte(`{"system":[{"type":"text","text":"` + callerSystem + `"}]}`)
+
+	out, err := applyCloaking(context.Background(), &config.Config{}, auth, payload, "claude-opus-5", "sk-ant-oat01-test")
+	if err != nil {
+		t.Fatalf("applyCloaking() error = %v", err)
+	}
+	system := gjson.GetBytes(out, "system").Array()
+	if len(system) != 2 {
+		t.Fatalf("system blocks = %d, want 2; body = %s", len(system), out)
+	}
+	if got := system[0].Get("text").String(); got != identity {
+		t.Fatalf("first system block = %q, want identity line; body = %s", got, out)
+	}
+	if got := system[1].Get("text").String(); got != callerSystem {
+		t.Fatalf("caller system block = %q, want %q; body = %s", got, callerSystem, out)
+	}
+}
+
+type claudeOAuthPrefixRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f claudeOAuthPrefixRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
 func TestEnsureClaudeThinkingDisplay_PreservesExplicitValue(t *testing.T) {
 	payload := []byte(`{"thinking":{"type":"enabled","budget_tokens":2048,"display":"omitted"}}`)
 	out := ensureClaudeThinkingDisplay(payload)
