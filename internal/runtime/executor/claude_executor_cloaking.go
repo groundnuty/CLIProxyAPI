@@ -414,6 +414,15 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 		return payload, nil
 	}
 
+	// Prefix mode: guarantee only the required first system block and leave the
+	// caller's own system prompt untouched. Full cloaking would replace the system
+	// array and relocate that prompt into the first user message, which silently
+	// changes what the caller asked the model to do — unacceptable for Claude
+	// Code's own auto-mode classifier, whose whole payload is its instructions.
+	if helps.IsPrefixMode(cloakMode) {
+		return prependIdentityBlock(payload), nil
+	}
+
 	// Skip system instructions for claude-3-5-haiku models
 	if !strings.HasPrefix(model, "claude-3-5-haiku") {
 		billingVersion := helps.DefaultClaudeVersion(cfg)
@@ -975,4 +984,44 @@ func ensureModelMaxTokens(body []byte, modelID string) []byte {
 	}
 
 	return body
+}
+
+// prependIdentityBlock ensures the Claude Code identity line is the first system
+// block, preserving every block the caller supplied.
+//
+// It is a no-op when the request already satisfies the endpoint — either because
+// the identity line is already first, or because full cloaking has already put its
+// billing header there.
+func prependIdentityBlock(payload []byte) []byte {
+	system := gjson.GetBytes(payload, "system")
+
+	identity := buildTextBlock(helps.ClaudeCodeIdentityLine, nil)
+
+	switch {
+	case !system.Exists():
+		out, _ := sjson.SetRawBytes(payload, "system", []byte("["+identity+"]"))
+		return out
+
+	case system.Type == gjson.String:
+		// Normalize the string form into an array so the identity block can lead.
+		existing := buildTextBlock(system.String(), nil)
+		out, _ := sjson.SetRawBytes(payload, "system", []byte("["+identity+","+existing+"]"))
+		return out
+
+	case system.IsArray():
+		first := strings.TrimSpace(gjson.GetBytes(payload, "system.0.text").String())
+		if strings.HasPrefix(first, "x-anthropic-billing-header:") ||
+			strings.HasPrefix(first, helps.ClaudeCodeIdentityLine) {
+			return payload
+		}
+		raw := strings.TrimSpace(system.Raw)
+		if len(raw) < 2 || raw[0] != '[' {
+			return payload
+		}
+		merged := "[" + identity + "," + raw[1:]
+		out, _ := sjson.SetRawBytes(payload, "system", []byte(merged))
+		return out
+	}
+
+	return payload
 }
