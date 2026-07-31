@@ -386,6 +386,13 @@ func applyCloaking(ctx context.Context, cfg *config.Config, auth *cliproxyauth.A
 	if cfg != nil && cfg.DisableClaudeCloakMode {
 		cloakMode = "never"
 	}
+	// A global mode is explicit intent, so it outranks the disable switch and
+	// reaches OAuth credentials whose token file carries no per-credential attr.
+	if cfg != nil {
+		if mode := strings.TrimSpace(cfg.ClaudeCloakMode); mode != "" {
+			cloakMode = mode
+		}
+	}
 	strictMode := attrStrict
 	sensitiveWords := attrWords
 	cacheUserID := attrCache

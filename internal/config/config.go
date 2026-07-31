@@ -137,6 +137,19 @@ type Config struct {
 	// the auth/OAuth token file). Default false preserves the per-client "auto" behavior.
 	DisableClaudeCloakMode bool `yaml:"disable-claude-cloak-mode" json:"disable-claude-cloak-mode"`
 
+	// ClaudeCloakMode sets the cloak mode for every Claude credential, including
+	// OAuth ones whose token file carries no per-credential attribute.
+	// One of "auto" (default), "never", "always", or "prefix".
+	//
+	// "prefix" exists for a narrow, measured problem: the Anthropic subscription
+	// endpoint refuses any request whose first system block is neither the Claude
+	// Code identity line nor a billing header, answering
+	// 429 {"type":"rate_limit_error","message":"Error"}. Claude Code's own
+	// auto-mode Bash classifier sends a different first block, so its calls are
+	// refused. "prefix" prepends only the identity line and leaves the caller's
+	// prompt untouched, unlike "always" which replaces the system array outright.
+	ClaudeCloakMode string `yaml:"claude-cloak-mode" json:"claude-cloak-mode"`
+
 	// OpenAICompatibility defines OpenAI API compatibility configurations for external providers.
 	OpenAICompatibility []OpenAICompatibility `yaml:"openai-compatibility" json:"openai-compatibility"`
 
